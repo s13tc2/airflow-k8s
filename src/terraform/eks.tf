@@ -33,7 +33,7 @@ resource "aws_eks_node_group" "node_group" {
     min_size     = var.node_group_min_size
   }
 
-  instance_types = ["t3.xlarge"]
+  instance_types = ["t3.medium"]
 
   depends_on = [
     aws_iam_role_policy_attachment.eks_node_policy,
