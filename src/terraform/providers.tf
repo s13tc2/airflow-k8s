@@ -22,6 +22,13 @@ terraform {
       version = "~> 3.0"
     }
   }
+  backend "s3" {
+    # Don't specify these values here - they will be passed via CLI
+    # bucket = "your-terraform-state-bucket"
+    # key    = "environment/terraform.tfstate"
+    # region = "us-west-2"
+    encrypt = true
+  }
 }
 
 provider "aws" {
