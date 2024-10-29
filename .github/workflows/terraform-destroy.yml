@@ -1,5 +1,4 @@
 name: "Terraform Destroy"
-
 on:
   workflow_dispatch:
     inputs:
@@ -16,16 +15,13 @@ on:
         description: 'Type "destroy-{environment}" to confirm (e.g., destroy-development)'
         required: true
         type: string
-
 permissions:
   contents: read
   pull-requests: write
-
 env:
   AWS_REGION: "us-west-2"
   TF_LOG: info
   TERRAFORM_WORKING_DIR: "src/terraform"
-
 jobs:
   terraform-destroy:
     name: "Terraform Destroy"
@@ -35,27 +31,22 @@ jobs:
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.inputs.environment }}
       cancel-in-progress: false
-
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-
       - name: Verify AWS Credentials
         run: aws sts get-caller-identity
-
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.5.0"
           terraform_wrapper: false
-
       - name: Terraform Init
         id: init
         working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
@@ -64,20 +55,30 @@ jobs:
             -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
             -backend-config="key=${{ github.event.inputs.environment }}/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}"
-
       - name: Remove EKS kubeconfig
         if: always()
         continue-on-error: true
         run: |
           rm -rf ~/.kube/config
           rm -rf ~/.kube/cache
-
-      - name: Terraform Destroy
+      - name: Destroy EKS Node Groups
         working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
         run: |
+          echo "Destroying EKS Node Groups first..."
+          terraform destroy -auto-approve -input=false \
+            -var="environment=${{ github.event.inputs.environment }}" \
+            -target="aws_eks_node_group.node_group"
+        continue-on-error: true
+      - name: Wait for Node Groups Deletion
+        run: |
+          echo "Waiting for node groups to be deleted..."
+          sleep 90
+      - name: Destroy Remaining Resources
+        working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
+        run: |
+          echo "Destroying remaining resources..."
           terraform destroy -auto-approve -input=false \
             -var="environment=${{ github.event.inputs.environment }}"
-
       - name: Clean up Terraform state
         if: success()
         continue-on-error: true
