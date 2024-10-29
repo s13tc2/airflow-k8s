@@ -8,9 +8,15 @@ on:
         description: "Environment to destroy"
         required: true
         default: "production"
+        type: choice
+        options:
+          - production
+          - staging
+          - development
       confirm_destroy:
-        description: 'Type "destroy" to confirm'
+        description: "Type the environment name to confirm destroy"
         required: true
+        type: string
 
 permissions:
   contents: read
@@ -26,10 +32,10 @@ jobs:
     runs-on: ubuntu-latest
     environment: ${{ github.event.inputs.environment }}
 
-    if: github.event.inputs.confirm_destroy == 'destroy'
+    if: github.event.inputs.confirm_destroy == github.event.inputs.environment
 
     concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}
+      group: ${{ github.workflow }}-${{ github.event.inputs.environment }}
       cancel-in-progress: false
 
     steps:
@@ -57,7 +63,9 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
       - name: Terraform Destroy
-        run: terraform destroy -auto-approve -input=false
+        run: |
+          terraform destroy -auto-approve -input=false \
+          -var="environment=${{ github.event.inputs.environment }}"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
