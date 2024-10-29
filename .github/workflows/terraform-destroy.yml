@@ -61,18 +61,44 @@ jobs:
         run: |
           rm -rf ~/.kube/config
           rm -rf ~/.kube/cache
-      - name: Destroy EKS Node Groups
+      - name: Check Node Groups Status
+        id: check_nodegroups
         working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
         run: |
-          echo "Destroying EKS Node Groups first..."
-          terraform destroy -auto-approve -input=false \
-            -var="environment=${{ github.event.inputs.environment }}" \
-            -target="aws_eks_node_group.node_group"
+          CLUSTER_NAME="airflow-cluster"
+          echo "Checking node groups for cluster $CLUSTER_NAME..."
+          aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region ${{ env.AWS_REGION }} || true
         continue-on-error: true
-      - name: Wait for Node Groups Deletion
+      - name: Destroy Node Groups with AWS CLI
+        working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
         run: |
-          echo "Waiting for node groups to be deleted..."
-          sleep 90
+          CLUSTER_NAME="airflow-cluster"
+          NODEGROUPS=$(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region ${{ env.AWS_REGION }} --query 'nodegroups[*]' --output text || echo "")
+
+          if [ ! -z "$NODEGROUPS" ]; then
+            echo "Found node groups: $NODEGROUPS"
+            for ng in $NODEGROUPS; do
+              echo "Deleting node group: $ng"
+              aws eks delete-nodegroup --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region ${{ env.AWS_REGION }}
+            done
+            
+            echo "Waiting for node groups to be deleted..."
+            for ng in $NODEGROUPS; do
+              while aws eks describe-nodegroup --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region ${{ env.AWS_REGION }} 2>/dev/null; do
+                echo "Waiting for node group $ng to be deleted..."
+                sleep 30
+              done
+            done
+          fi
+        continue-on-error: true
+      - name: Wait After Node Group Deletion
+        run: |
+          echo "Waiting additional time after node group deletion..."
+          sleep 60
+      - name: Terraform State Refresh
+        working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
+        run: terraform refresh
+        continue-on-error: true
       - name: Destroy Remaining Resources
         working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
         run: |
