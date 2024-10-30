@@ -23,7 +23,7 @@ permissions:
 env:
   AWS_REGION: "us-west-2"
   TF_LOG: info
-  TERRAFORM_WORKING_DIR: "./src/terraform" # Adjust this to your terraform files location
+  TERRAFORM_WORKING_DIR: "./src/terraform"
   CLUSTER_NAME: "airflow-cluster"
 
 jobs:
@@ -54,6 +54,37 @@ jobs:
         run: |
           rm -rf .terraform .terraform.lock.hcl || true
           rm -rf ~/.kube/config ~/.kube/cache || true
+
+      - name: Check and Clean Existing IAM Roles
+        run: |
+          # Function to detach and delete role policies
+          delete_role() {
+            local ROLE_NAME=$1
+            echo "Checking role: $ROLE_NAME"
+            
+            # List and detach attached policies
+            for ARN in $(aws iam list-attached-role-policies --role-name $ROLE_NAME --query 'AttachedPolicies[*].PolicyArn' --output text 2>/dev/null); do
+              echo "Detaching policy: $ARN from role: $ROLE_NAME"
+              aws iam detach-role-policy --role-name $ROLE_NAME --policy-arn $ARN
+            done
+            
+            # Delete the role
+            echo "Deleting role: $ROLE_NAME"
+            aws iam delete-role --role-name $ROLE_NAME
+          }
+
+          # Delete cluster role
+          CLUSTER_ROLE="${CLUSTER_NAME}-cluster-role"
+          if aws iam get-role --role-name $CLUSTER_ROLE 2>/dev/null; then
+            delete_role $CLUSTER_ROLE
+          fi
+
+          # Delete node role
+          NODE_ROLE="${CLUSTER_NAME}-node-role"
+          if aws iam get-role --role-name $NODE_ROLE 2>/dev/null; then
+            delete_role $NODE_ROLE
+          fi
+        continue-on-error: true
 
       - name: Check and Clean Existing Resources
         run: |
