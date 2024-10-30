@@ -55,6 +55,40 @@ resource "helm_release" "airflow" {
           cpu: "1000m"
           memory: "2Gi"
 
+    # Use LocalExecutor initially for simpler setup
+    executor: LocalExecutor
+
+    # Persistence using default storage class
+    dags:
+      persistence:
+        enabled: true
+        size: 1Gi
+
+    logs:
+      persistence:
+        enabled: true
+        size: 1Gi
+
+    # Default lightweight database
+    postgresql:
+      enabled: true
+
+    # Configure startup probe with longer timeouts
+    webserver:
+      startupProbe:
+        enabled: true
+        initialDelaySeconds: 60
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 30
+
+    scheduler:
+      startupProbe:
+        enabled: true
+        initialDelaySeconds: 60
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 30
     EOT
   ]
 
