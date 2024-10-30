@@ -54,7 +54,7 @@ resource "aws_internet_gateway" "main" {
 
 # NAT Gateway
 resource "aws_eip" "nat" {
-  domain = "vpc"
+#   domain = "vpc"
 
   tags = {
     Name        = "${var.cluster_name}-nat-eip"
