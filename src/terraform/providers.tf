@@ -50,3 +50,32 @@ provider "helm" {
 }
 
 provider "random" {}
+
+# Add to providers.tf
+provider "aws" {
+  alias  = "monitoring"
+  region = var.aws_region
+}
+
+# Add new file: monitoring.tf
+resource "aws_cloudwatch_log_group" "eks_cluster" {
+  name              = "/aws/eks/${var.cluster_name}/cluster"
+  retention_in_days = 30
+}
+
+resource "aws_cloudwatch_metric_alarm" "node_cpu" {
+  alarm_name          = "${var.cluster_name}-node-cpu-utilization"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "2"
+  metric_name        = "cpu_utilization_over_pod_limit"
+  namespace          = "AWS/EKS"
+  period             = "300"
+  statistic          = "Average"
+  threshold          = "80"
+  alarm_description  = "This metric monitors EKS node CPU utilization"
+  alarm_actions      = [aws_sns_topic.eks_alerts.arn]
+  
+  dimensions = {
+    ClusterName = aws_eks_cluster.cluster.name
+  }
+}

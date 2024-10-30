@@ -96,3 +96,26 @@ resource "aws_s3_bucket_policy" "airflow_logs" {
     ]
   })
 }
+
+# Add to s3.tf
+resource "aws_s3_bucket_replication_configuration" "airflow_logs" {
+  depends_on = [aws_s3_bucket_versioning.airflow_logs]
+  
+  role   = aws_iam_role.replication.arn
+  bucket = aws_s3_bucket.airflow_logs.id
+
+  rule {
+    id     = "airflow-logs-replication"
+    status = "Enabled"
+
+    destination {
+      bucket = aws_s3_bucket.airflow_logs_replica.arn
+      storage_class = "STANDARD_IA"
+    }
+  }
+}
+
+resource "aws_s3_bucket" "airflow_logs_replica" {
+  provider = aws.dr_region
+  bucket   = "${local.airflow_bucket_name}-replica"
+}

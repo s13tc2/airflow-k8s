@@ -47,3 +47,24 @@ resource "aws_eks_node_group" "node_group" {
   }
 
 }
+
+# Add to eks.tf
+resource "aws_eks_node_group" "spot" {
+  cluster_name    = aws_eks_cluster.cluster.name
+  node_group_name = "${var.cluster_name}-spot-group"
+  node_role_arn   = aws_iam_role.eks_node_role.arn
+  subnet_ids      = aws_subnet.private[*].id
+
+  capacity_type = "SPOT"
+  instance_types = ["t3.medium", "t3a.medium"]
+
+  scaling_config {
+    desired_size = var.spot_node_group_desired_size
+    max_size     = var.spot_node_group_max_size
+    min_size     = var.spot_node_group_min_size
+  }
+
+  labels = {
+    lifecycle = "Spot"
+  }
+}

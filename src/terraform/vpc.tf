@@ -38,3 +38,42 @@ resource "aws_subnet" "private" {
     "kubernetes.io/role/internal-elb"           = "1"
   }
 }
+
+# Add to vpc.tf - Network ACLs
+resource "aws_network_acl" "private" {
+  vpc_id = aws_vpc.main.id
+  subnet_ids = aws_subnet.private[*].id
+  
+  ingress {
+    protocol   = -1
+    rule_no    = 100
+    action     = "allow"
+    cidr_block = var.vpc_cidr
+    from_port  = 0
+    to_port    = 0
+  }
+  
+  egress {
+    protocol   = -1
+    rule_no    = 100
+    action     = "allow"
+    cidr_block = "0.0.0.0/0"
+    from_port  = 0
+    to_port    = 0
+  }
+}
+
+# Add to eks.tf - Security Groups
+resource "aws_security_group" "eks_cluster" {
+  name        = "${var.cluster_name}-cluster-sg"
+  description = "Security group for EKS cluster"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description = "Allow worker nodes to communicate with the cluster API Server"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+}

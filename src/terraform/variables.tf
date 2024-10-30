@@ -58,3 +58,25 @@ variable "company_prefix" {
   type        = string
   default     = "company"  # Change this to your company name/prefix
 }
+
+# Add to variables.tf
+variable "tags" {
+  description = "Common tags for all resources"
+  type        = map(string)
+  default     = {
+    Environment = "production"
+    ManagedBy  = "terraform"
+    Owner      = "platform-team"
+    Project    = "airflow"
+  }
+}
+
+# Update all resource tags to include the common tags
+locals {
+  common_tags = merge(
+    var.tags,
+    {
+      ClusterName = var.cluster_name
+    }
+  )
+}
