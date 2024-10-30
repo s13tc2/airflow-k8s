@@ -1,79 +1,99 @@
 # vpc.tf
 resource "aws_vpc" "main" {
-  cidr_block           = var.vpc_cidr
+  cidr_block           = "10.0.0.0/16"
   enable_dns_hostnames = true
   enable_dns_support   = true
 
   tags = {
-    Name                                        = "${var.cluster_name}-vpc"
-    Environment                                 = var.environment
-    "kubernetes.io/cluster/${var.cluster_name}" = "shared"
-  }
-}
-
-resource "aws_subnet" "public" {
-  count             = 2
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = cidrsubnet(var.vpc_cidr, 8, count.index)
-  availability_zone = data.aws_availability_zones.available.names[count.index]
-
-  tags = {
-    Name                                        = "${var.cluster_name}-public-${count.index + 1}"
-    Environment                                 = var.environment
-    "kubernetes.io/cluster/${var.cluster_name}" = "shared"
-    "kubernetes.io/role/elb"                    = "1"
+    Name = "${var.cluster_name}-vpc"
   }
 }
 
 resource "aws_subnet" "private" {
   count             = 2
   vpc_id            = aws_vpc.main.id
-  cidr_block        = cidrsubnet(var.vpc_cidr, 8, count.index + 2)
+  cidr_block        = "10.0.${count.index + 1}.0/24"
   availability_zone = data.aws_availability_zones.available.names[count.index]
 
   tags = {
-    Name                                        = "${var.cluster_name}-private-${count.index + 1}"
-    Environment                                 = var.environment
+    Name                              = "${var.cluster_name}-private-${count.index + 1}"
     "kubernetes.io/cluster/${var.cluster_name}" = "shared"
-    "kubernetes.io/role/internal-elb"           = "1"
+    "kubernetes.io/role/internal-elb" = "1"
   }
 }
 
-# Add to vpc.tf - Network ACLs
-resource "aws_network_acl" "private" {
+resource "aws_subnet" "public" {
+  count             = 2
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.${count.index + 10}.0/24"
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name                              = "${var.cluster_name}-public-${count.index + 1}"
+    "kubernetes.io/cluster/${var.cluster_name}" = "shared"
+    "kubernetes.io/role/elb"          = "1"
+  }
+}
+
+# Internet Gateway
+resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
-  subnet_ids = aws_subnet.private[*].id
-  
-  ingress {
-    protocol   = -1
-    rule_no    = 100
-    action     = "allow"
-    cidr_block = var.vpc_cidr
-    from_port  = 0
-    to_port    = 0
-  }
-  
-  egress {
-    protocol   = -1
-    rule_no    = 100
-    action     = "allow"
-    cidr_block = "0.0.0.0/0"
-    from_port  = 0
-    to_port    = 0
+
+  tags = {
+    Name = "${var.cluster_name}-igw"
   }
 }
 
-# Add to eks.tf - Security Groups
-resource "aws_security_group" "eks_cluster" {
-  name        = "${var.cluster_name}-cluster-sg"
-  description = "Security group for EKS cluster"
-  vpc_id      = aws_vpc.main.id
+# NAT Gateway
+resource "aws_eip" "nat" {
+  domain = "vpc"
+}
 
-  ingress {
-    description = "Allow worker nodes to communicate with the cluster API Server"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = [var.vpc_cidr]
+resource "aws_nat_gateway" "main" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public[0].id
+
+  tags = {
+    Name = "${var.cluster_name}-nat"
   }
+}
+
+# Route Tables
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main.id
+  }
+
+  tags = {
+    Name = "${var.cluster_name}-public"
+  }
+}
+
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.main.id
+  }
+
+  tags = {
+    Name = "${var.cluster_name}-private"
+  }
+}
+
+resource "aws_route_table_association" "public" {
+  count          = 2
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
+}
+
+resource "aws_route_table_association" "private" {
+  count          = 2
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private.id
 }

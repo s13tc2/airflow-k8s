@@ -23,7 +23,7 @@ permissions:
 env:
   AWS_REGION: "us-west-2"
   TF_LOG: info
-  TERRAFORM_WORKING_DIR: "src/terraform"
+  TERRAFORM_WORKING_DIR: "./src/terraform" # Adjust this to your terraform files location
   CLUSTER_NAME: "airflow-cluster"
 
 jobs:
@@ -32,9 +32,6 @@ jobs:
     runs-on: ubuntu-latest
     environment: ${{ github.event.inputs.environment }}
     if: github.event.inputs.confirm_apply == 'apply'
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.event.inputs.environment }}
-      cancel-in-progress: false
 
     steps:
       - name: Checkout Repository
@@ -60,55 +57,10 @@ jobs:
 
       - name: Check and Clean Existing Resources
         run: |
-          # Check for existing IAM roles with specific prefixes
-          for ROLE_NAME in "${CLUSTER_NAME}-cluster-role" "${CLUSTER_NAME}-node-role" "${CLUSTER_NAME}-airflow-role"; do
-            if aws iam get-role --role-name $ROLE_NAME 2>/dev/null; then
-              echo "Found existing role: $ROLE_NAME"
-              
-              # Detach policies
-              for policy in $(aws iam list-attached-role-policies --role-name $ROLE_NAME --query 'AttachedPolicies[*].PolicyArn' --output text); do
-                echo "Detaching policy: $policy from role: $ROLE_NAME"
-                aws iam detach-role-policy --role-name $ROLE_NAME --policy-arn $policy
-              done
-              
-              # Delete inline policies
-              for policy in $(aws iam list-role-policies --role-name $ROLE_NAME --query 'PolicyNames[*]' --output text); do
-                echo "Deleting inline policy: $policy from role: $ROLE_NAME"
-                aws iam delete-role-policy --role-name $ROLE_NAME --policy-name $policy
-              done
-              
-              # Wait a bit for policy detachment
-              sleep 10
-              
-              # Delete role
-              echo "Deleting role: $ROLE_NAME"
-              aws iam delete-role --role-name $ROLE_NAME || true
-            fi
-          done
-
           # Check for existing node groups
-          NODEGROUPS=$(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region ${{ env.AWS_REGION }} --query 'nodegroups[*]' --output text 2>/dev/null || echo "")
-
-          if [ ! -z "$NODEGROUPS" ]; then
+          if NODEGROUPS=$(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region ${{ env.AWS_REGION }} --query 'nodegroups[*]' --output text 2>/dev/null); then
             echo "Found existing node groups: $NODEGROUPS"
             for ng in $NODEGROUPS; do
-              # Get the ASG name
-              ASG_NAME=$(aws eks describe-nodegroup \
-                --cluster-name $CLUSTER_NAME \
-                --nodegroup-name $ng \
-                --query 'nodegroup.resources.autoScalingGroups[0].name' \
-                --output text 2>/dev/null || echo "")
-              
-              # Scale down ASG if it exists
-              if [ ! -z "$ASG_NAME" ]; then
-                echo "Scaling down ASG: $ASG_NAME"
-                aws autoscaling update-auto-scaling-group \
-                  --auto-scaling-group-name $ASG_NAME \
-                  --min-size 0 \
-                  --max-size 0 \
-                  --desired-capacity 0
-              fi
-              
               echo "Deleting node group: $ng"
               aws eks delete-nodegroup \
                 --cluster-name $CLUSTER_NAME \
@@ -116,30 +68,15 @@ jobs:
                 --region ${{ env.AWS_REGION }}
               
               echo "Waiting for node group deletion..."
-              while aws eks describe-nodegroup \
+              aws eks wait nodegroup-deleted \
                 --cluster-name $CLUSTER_NAME \
                 --nodegroup-name $ng \
-                --region ${{ env.AWS_REGION }} 2>/dev/null; do
-                echo "Still waiting for node group $ng to be deleted..."
-                sleep 30
-              done
-            done
-          fi
-
-          # Clean up any existing OIDC providers
-          OIDC_PROVIDERS=$(aws iam list-open-id-connect-providers --query 'OpenIDConnectProviderList[*].Arn' --output text)
-          if [ ! -z "$OIDC_PROVIDERS" ]; then
-            for provider in $OIDC_PROVIDERS; do
-              if aws iam get-open-id-connect-provider --open-id-connect-provider-arn $provider 2>/dev/null | grep -q $CLUSTER_NAME; then
-                echo "Deleting OIDC provider: $provider"
-                aws iam delete-open-id-connect-provider --open-id-connect-provider-arn $provider
-              fi
+                --region ${{ env.AWS_REGION }}
             done
           fi
         continue-on-error: true
 
       - name: Terraform Init
-        id: init
         working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
         run: |
           terraform init \
@@ -148,7 +85,6 @@ jobs:
             -backend-config="region=${{ env.AWS_REGION }}"
 
       - name: Terraform Plan
-        id: plan
         working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
         run: |
           terraform plan \
@@ -159,50 +95,7 @@ jobs:
       - name: Terraform Apply
         working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
         run: |
-          # Initial apply for cluster and IAM resources
-          echo "Initial apply..."
-          if ! terraform apply -auto-approve -input=false tfplan; then
-            echo "Initial apply failed, checking cluster status..."
-            
-            # Check cluster status
-            if aws eks describe-cluster --name $CLUSTER_NAME --region ${{ env.AWS_REGION }} 2>/dev/null; then
-              echo "Cluster exists, proceeding with cleanup..."
-              
-              # Clean up node groups if they exist
-              NODEGROUPS=$(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region ${{ env.AWS_REGION }} --query 'nodegroups[*]' --output text 2>/dev/null || echo "")
-              if [ ! -z "$NODEGROUPS" ]; then
-                echo "Cleaning up node groups..."
-                terraform state rm aws_eks_node_group.node_group || true
-                
-                for ng in $NODEGROUPS; do
-                  aws eks delete-nodegroup \
-                    --cluster-name $CLUSTER_NAME \
-                    --nodegroup-name $ng \
-                    --region ${{ env.AWS_REGION }}
-                  
-                  while aws eks describe-nodegroup \
-                    --cluster-name $CLUSTER_NAME \
-                    --nodegroup-name $ng \
-                    --region ${{ env.AWS_REGION }} 2>/dev/null; do
-                    echo "Waiting for node group deletion..."
-                    sleep 30
-                  done
-                done
-              fi
-              
-              # Refresh state and retry apply
-              echo "Refreshing state..."
-              terraform refresh
-              
-              echo "Retrying apply..."
-              terraform apply -auto-approve -input=false \
-                -var="environment=${{ github.event.inputs.environment }}" \
-                -var="cluster_name=$CLUSTER_NAME"
-            else
-              echo "Cluster does not exist, original apply failed"
-              exit 1
-            fi
-          fi
+          terraform apply -auto-approve -input=false tfplan
 
       - name: Verify Cluster
         if: success()
@@ -229,5 +122,7 @@ jobs:
           echo "Node Status:"
           kubectl get nodes
 
-          echo "Cluster Addons:"
-          aws eks list-addons --cluster-name $CLUSTER_NAME --region ${{ env.AWS_REGION }}
+          echo "Airflow Status:"
+          kubectl get pods -n airflow
+          echo "Airflow Webserver URL:"
+          kubectl get svc -n airflow airflow-webserver
