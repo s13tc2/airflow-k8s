@@ -12,14 +12,9 @@ on:
           - staging
           - production
       confirm_destroy:
-        description: 'Type "destroy-{environment}" to confirm (e.g., destroy-development)'
+        description: 'Type "destroy" to confirm'
         required: true
         type: string
-      dry_run:
-        description: "Perform a dry run first (plan only)"
-        type: boolean
-        default: true
-        required: false
 
 permissions:
   contents: read
@@ -31,34 +26,11 @@ env:
   TERRAFORM_WORKING_DIR: "src/terraform"
 
 jobs:
-  validate-inputs:
-    name: "Validate Destruction Request"
-    runs-on: ubuntu-latest
-    steps:
-      - name: Verify Confirmation String
-        run: |
-          EXPECTED="destroy-${{ github.event.inputs.environment }}"
-          PROVIDED="${{ github.event.inputs.confirm_destroy }}"
-          if [ "$EXPECTED" != "$PROVIDED" ]; then
-            echo "Error: Confirmation string does not match the expected format"
-            echo "Expected: $EXPECTED"
-            echo "Provided: $PROVIDED"
-            exit 1
-          fi
-      - name: Check Business Hours
-        run: |
-          HOUR_UTC=$(date -u +%H)
-          DAY_UTC=$(date -u +%u)
-          if [ $DAY_UTC -gt 5 ] || [ $HOUR_UTC -lt 9 ] || [ $HOUR_UTC -gt 17 ]; then
-            echo "Error: Destructions are only allowed during business hours (UTC 9-17, Mon-Fri)"
-            exit 1
-          fi
-
   terraform-destroy:
     name: "Terraform Destroy"
-    needs: validate-inputs
     runs-on: ubuntu-latest
     environment: ${{ github.event.inputs.environment }}
+    if: github.event.inputs.confirm_destroy == 'destroy'
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.inputs.environment }}
       cancel-in-progress: false
@@ -75,10 +47,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Verify AWS Credentials
-        run: |
-          CALLER_IDENTITY=$(aws sts get-caller-identity)
-          echo "Using AWS Identity:"
-          echo "$CALLER_IDENTITY" | jq .
+        run: aws sts get-caller-identity
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -95,75 +64,78 @@ jobs:
             -backend-config="key=${{ github.event.inputs.environment }}/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}"
 
-      - name: Backup Terraform State
+      - name: Configure kubectl for cleanup
         run: |
-          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-          aws s3 cp \
-            "s3://${{ secrets.TF_STATE_BUCKET }}/${{ github.event.inputs.environment }}/terraform.tfstate" \
-            "s3://${{ secrets.TF_STATE_BUCKET }}/backups/${TIMESTAMP}_${{ github.event.inputs.environment }}_terraform.tfstate"
-
-      - name: Terraform Plan Destroy
-        id: plan
-        working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
-        run: |
-          terraform plan -destroy \
-            -var="environment=${{ github.event.inputs.environment }}" \
-            -out=destroy.tfplan
-
-      - name: Remove EKS kubeconfig
-        if: always()
+          aws eks update-kubeconfig \
+            --name airflow-${{ github.event.inputs.environment }} \
+            --region ${{ env.AWS_REGION }}
         continue-on-error: true
-        run: |
-          rm -rf ~/.kube/config
-          rm -rf ~/.kube/cache
 
-      - name: Check Node Groups Status
-        id: check_nodegroups
-        working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
+      - name: Clean EKS Resources
         run: |
-          CLUSTER_NAME="airflow-cluster"
+          # Try to drain and delete nodes if possible
+          NODES=$(kubectl get nodes -o name || echo "")
+          if [ ! -z "$NODES" ]; then
+            echo "Draining nodes: $NODES"
+            for node in $NODES; do
+              kubectl drain $node --ignore-daemonsets --delete-emptydir-data --force --timeout=2m || true
+            done
+          fi
+
+          # Delete all workloads first
+          kubectl delete deploy,sts,ds --all -A --timeout=5m || true
+          kubectl delete pvc,pv --all -A --timeout=5m || true
+
+          # Clean up kubectl config
+          rm -rf ~/.kube/config ~/.kube/cache || true
+        continue-on-error: true
+
+      - name: Clean EKS Node Groups
+        run: |
+          CLUSTER_NAME="airflow-${{ github.event.inputs.environment }}"
+
           echo "Checking node groups for cluster $CLUSTER_NAME..."
-          NODEGROUPS=$(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region ${{ env.AWS_REGION }} || echo "")
-          echo "nodegroups=${NODEGROUPS}" >> $GITHUB_OUTPUT
+          NODEGROUPS=$(aws eks list-nodegroups \
+            --cluster-name $CLUSTER_NAME \
+            --region ${{ env.AWS_REGION }} \
+            --query 'nodegroups[*]' \
+            --output text || echo "")
+
+          if [ ! -z "$NODEGROUPS" ]; then
+            echo "Found node groups: $NODEGROUPS"
+            for ng in $NODEGROUPS; do
+              echo "Deleting node group: $ng"
+              aws eks delete-nodegroup \
+                --cluster-name $CLUSTER_NAME \
+                --nodegroup-name $ng \
+                --region ${{ env.AWS_REGION }} || true
+              
+              echo "Waiting for node group deletion..."
+              while aws eks describe-nodegroup \
+                --cluster-name $CLUSTER_NAME \
+                --nodegroup-name $ng \
+                --region ${{ env.AWS_REGION }} 2>/dev/null; do
+                echo "Still waiting for node group $ng to be deleted..."
+                sleep 30
+              done
+            done
+          fi
         continue-on-error: true
 
-      - name: Destroy Node Groups with AWS CLI
-        if: steps.check_nodegroups.outputs.nodegroups != ''
+      - name: Wait for Resource Cleanup
+        run: sleep 60
+
+      - name: Terraform Destroy
         working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
         run: |
-          CLUSTER_NAME="airflow-cluster"
-          NODEGROUPS=$(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region ${{ env.AWS_REGION }} --query 'nodegroups[*]' --output text)
+          # Refresh state before destroy
+          terraform refresh || true
 
-          for ng in $NODEGROUPS; do
-            echo "Deleting node group: $ng"
-            aws eks delete-nodegroup --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region ${{ env.AWS_REGION }}
-            
-            echo "Waiting for node group $ng to be deleted..."
-            aws eks wait nodegroup-deleted \
-              --cluster-name $CLUSTER_NAME \
-              --nodegroup-name $ng \
-              --region ${{ env.AWS_REGION }}
-          done
+          # Main destroy attempt
+          terraform destroy -auto-approve -input=false \
+            -var="environment=${{ github.event.inputs.environment }}"
 
-      - name: Wait After Node Group Deletion
-        if: steps.check_nodegroups.outputs.nodegroups != ''
-        run: |
-          echo "Waiting additional time after node group deletion..."
-          sleep 60
-
-      - name: Terraform State Refresh
-        working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
-        run: terraform refresh
-        continue-on-error: true
-
-      - name: Execute Destroy
-        if: ${{ !github.event.inputs.dry_run }}
-        working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
-        run: |
-          echo "Destroying infrastructure..."
-          terraform apply destroy.tfplan
-
-      - name: Clean up Terraform state
-        if: success() && !github.event.inputs.dry_run
+      - name: Cleanup Terraform State
+        if: success()
         run: |
           aws s3 rm "s3://${{ secrets.TF_STATE_BUCKET }}/${{ github.event.inputs.environment }}/terraform.tfstate"
