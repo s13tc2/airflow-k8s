@@ -55,6 +55,51 @@ jobs:
           rm -rf .terraform .terraform.lock.hcl || true
           rm -rf ~/.kube/config ~/.kube/cache || true
 
+      - name: Check and Clean Existing EKS Resources
+        run: |
+          # Function to wait for cluster deletion
+          wait_for_cluster_deletion() {
+            local cluster_name=$1
+            echo "Waiting for cluster deletion to complete..."
+            while true; do
+              if ! aws eks describe-cluster --name $cluster_name --region ${{ env.AWS_REGION }} 2>/dev/null; then
+                echo "Cluster deleted successfully"
+                break
+              fi
+              echo "Still waiting for cluster deletion..."
+              sleep 30
+            done
+          }
+
+          # Check for existing node groups and delete them
+          if NODEGROUPS=$(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region ${{ env.AWS_REGION }} --query 'nodegroups[*]' --output text 2>/dev/null); then
+            echo "Found existing node groups: $NODEGROUPS"
+            for ng in $NODEGROUPS; do
+              echo "Deleting node group: $ng"
+              aws eks delete-nodegroup \
+                --cluster-name $CLUSTER_NAME \
+                --nodegroup-name $ng \
+                --region ${{ env.AWS_REGION }}
+              
+              echo "Waiting for node group deletion..."
+              aws eks wait nodegroup-deleted \
+                --cluster-name $CLUSTER_NAME \
+                --nodegroup-name $ng \
+                --region ${{ env.AWS_REGION }}
+            done
+          fi
+
+          # Check for existing cluster and delete it
+          if aws eks describe-cluster --name $CLUSTER_NAME --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            echo "Deleting existing EKS cluster: $CLUSTER_NAME"
+            aws eks delete-cluster \
+              --name $CLUSTER_NAME \
+              --region ${{ env.AWS_REGION }}
+            
+            wait_for_cluster_deletion $CLUSTER_NAME
+          fi
+        continue-on-error: true
+
       - name: Check and Clean Existing IAM Roles
         run: |
           # Function to detach and delete role policies
@@ -66,6 +111,12 @@ jobs:
             for ARN in $(aws iam list-attached-role-policies --role-name $ROLE_NAME --query 'AttachedPolicies[*].PolicyArn' --output text 2>/dev/null); do
               echo "Detaching policy: $ARN from role: $ROLE_NAME"
               aws iam detach-role-policy --role-name $ROLE_NAME --policy-arn $ARN
+            done
+            
+            # Delete inline policies if any
+            for POLICY in $(aws iam list-role-policies --role-name $ROLE_NAME --query 'PolicyNames[*]' --output text 2>/dev/null); do
+              echo "Deleting inline policy: $POLICY from role: $ROLE_NAME"
+              aws iam delete-role-policy --role-name $ROLE_NAME --policy-name $POLICY
             done
             
             # Delete the role
@@ -83,27 +134,6 @@ jobs:
           NODE_ROLE="${CLUSTER_NAME}-node-role"
           if aws iam get-role --role-name $NODE_ROLE 2>/dev/null; then
             delete_role $NODE_ROLE
-          fi
-        continue-on-error: true
-
-      - name: Check and Clean Existing Resources
-        run: |
-          # Check for existing node groups
-          if NODEGROUPS=$(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region ${{ env.AWS_REGION }} --query 'nodegroups[*]' --output text 2>/dev/null); then
-            echo "Found existing node groups: $NODEGROUPS"
-            for ng in $NODEGROUPS; do
-              echo "Deleting node group: $ng"
-              aws eks delete-nodegroup \
-                --cluster-name $CLUSTER_NAME \
-                --nodegroup-name $ng \
-                --region ${{ env.AWS_REGION }}
-              
-              echo "Waiting for node group deletion..."
-              aws eks wait nodegroup-deleted \
-                --cluster-name $CLUSTER_NAME \
-                --nodegroup-name $ng \
-                --region ${{ env.AWS_REGION }}
-            done
           fi
         continue-on-error: true
 
