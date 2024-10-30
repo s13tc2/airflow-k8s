@@ -114,8 +114,3 @@ resource "aws_s3_bucket_replication_configuration" "airflow_logs" {
     }
   }
 }
-
-resource "aws_s3_bucket" "airflow_logs_replica" {
-  provider = aws.dr_region
-  bucket   = "${local.airflow_bucket_name}-replica"
-}
