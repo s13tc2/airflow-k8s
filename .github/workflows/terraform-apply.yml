@@ -55,211 +55,96 @@ jobs:
           rm -rf .terraform .terraform.lock.hcl || true
           rm -rf ~/.kube/config ~/.kube/cache || true
 
-      - name: Check and Clean Existing VPC Resources
-        run: |
-          # Function to delete NAT Gateways
-          delete_nat_gateways() {
-            local VPC_ID=$1
-            echo "Checking NAT Gateways in VPC: $VPC_ID"
-            NAT_GATEWAYS=$(aws ec2 describe-nat-gateways --filter "Name=vpc-id,Values=$VPC_ID" --query 'NatGateways[*].NatGatewayId' --output text)
-            for ng in $NAT_GATEWAYS; do
-              echo "Deleting NAT Gateway: $ng"
-              aws ec2 delete-nat-gateway --nat-gateway-id $ng
-              echo "Waiting for NAT Gateway deletion..."
-              aws ec2 wait nat-gateway-deleted --nat-gateway-ids $ng
-            done
-          }
-
-          # Function to delete EIPs
-          delete_eips() {
-            echo "Checking Elastic IPs"
-            EIPS=$(aws ec2 describe-addresses --query 'Addresses[*].AllocationId' --output text)
-            for eip in $EIPS; do
-              echo "Deleting EIP: $eip"
-              aws ec2 release-address --allocation-id $eip
-            done
-          }
-
-          # Function to clean VPC resources
-          clean_vpc() {
-            local VPC_ID=$1
-            echo "Cleaning VPC: $VPC_ID"
-
-            # Delete NAT Gateways first
-            delete_nat_gateways $VPC_ID
-
-            # Delete EIPs
-            delete_eips
-
-            # Delete Load Balancers
-            echo "Checking for Load Balancers"
-            LBS=$(aws elbv2 describe-load-balancers --query 'LoadBalancers[?VpcId==`'$VPC_ID'`].LoadBalancerArn' --output text)
-            for lb in $LBS; do
-              echo "Deleting Load Balancer: $lb"
-              aws elbv2 delete-load-balancer --load-balancer-arn $lb
-            done
-
-            # Detach and delete Internet Gateway
-            echo "Checking Internet Gateways"
-            IGW=$(aws ec2 describe-internet-gateways --filters "Name=attachment.vpc-id,Values=$VPC_ID" --query 'InternetGateways[*].InternetGatewayId' --output text)
-            if [ ! -z "$IGW" ]; then
-              echo "Detaching and deleting Internet Gateway: $IGW"
-              aws ec2 detach-internet-gateway --internet-gateway-id $IGW --vpc-id $VPC_ID
-              aws ec2 delete-internet-gateway --internet-gateway-id $IGW
-            fi
-
-            # Delete Subnets
-            echo "Checking Subnets"
-            SUBNETS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --query 'Subnets[*].SubnetId' --output text)
-            for subnet in $SUBNETS; do
-              echo "Deleting Subnet: $subnet"
-              aws ec2 delete-subnet --subnet-id $subnet
-            done
-
-            # Delete Route Tables
-            echo "Checking Route Tables"
-            RTS=$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$VPC_ID" --query 'RouteTables[?Associations[0].Main != `true`].RouteTableId' --output text)
-            for rt in $RTS; do
-              echo "Deleting Route Table: $rt"
-              aws ec2 delete-route-table --route-table-id $rt
-            done
-
-            # Delete Security Groups (except default)
-            echo "Checking Security Groups"
-            SGS=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC_ID" --query 'SecurityGroups[?GroupName!=`default`].GroupId' --output text)
-            for sg in $SGS; do
-              echo "Deleting Security Group: $sg"
-              aws ec2 delete-security-group --group-id $sg
-            done
-
-            # Finally, delete the VPC
-            echo "Deleting VPC: $VPC_ID"
-            aws ec2 delete-vpc --vpc-id $VPC_ID
-          }
-
-          # Get VPC ID and clean it
-          VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=${CLUSTER_NAME}-vpc" --query 'Vpcs[*].VpcId' --output text)
-          if [ ! -z "$VPC_ID" ]; then
-            echo "Found VPC: $VPC_ID"
-            clean_vpc $VPC_ID
-          fi
-        continue-on-error: true
-
-      - name: Check and Clean Existing Resources
-        run: |
-          # Check for existing node groups
-          if NODEGROUPS=$(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region ${{ env.AWS_REGION }} --query 'nodegroups[*]' --output text 2>/dev/null); then
-            echo "Found existing node groups: $NODEGROUPS"
-            for ng in $NODEGROUPS; do
-              echo "Deleting node group: $ng"
-              aws eks delete-nodegroup \
-                --cluster-name $CLUSTER_NAME \
-                --nodegroup-name $ng \
-                --region ${{ env.AWS_REGION }}
-              
-              echo "Waiting for node group deletion..."
-              aws eks wait nodegroup-deleted \
-                --cluster-name $CLUSTER_NAME \
-                --nodegroup-name $ng \
-                --region ${{ env.AWS_REGION }}
-            done
-          fi
-
-          # Check for existing cluster and delete it
-          if aws eks describe-cluster --name $CLUSTER_NAME --region ${{ env.AWS_REGION }} 2>/dev/null; then
-            echo "Deleting existing EKS cluster: $CLUSTER_NAME"
-            aws eks delete-cluster \
-              --name $CLUSTER_NAME \
-              --region ${{ env.AWS_REGION }}
+          - name: Clean Existing Resources
+          run: |
+            # Get all VPCs with the cluster name tag
+            VPC_IDS=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=${CLUSTER_NAME}*" --query 'Vpcs[*].VpcId' --output text)
             
-            echo "Waiting for cluster deletion..."
-            aws eks wait cluster-deleted \
-              --name $CLUSTER_NAME \
-              --region ${{ env.AWS_REGION }}
-          fi
-        continue-on-error: true
-
-      - name: Check and Clean Existing EKS Resources
-        run: |
-          # Function to wait for cluster deletion
-          wait_for_cluster_deletion() {
-            local cluster_name=$1
-            echo "Waiting for cluster deletion to complete..."
-            while true; do
-              if ! aws eks describe-cluster --name $cluster_name --region ${{ env.AWS_REGION }} 2>/dev/null; then
-                echo "Cluster deleted successfully"
-                break
+            for VPC_ID in $VPC_IDS; do
+              echo "Cleaning VPC: $VPC_ID"
+              
+              # Get and delete NAT Gateways
+              NAT_GATEWAYS=$(aws ec2 describe-nat-gateways --filter "Name=vpc-id,Values=$VPC_ID" --query 'NatGateways[*].NatGatewayId' --output text)
+              for NAT in $NAT_GATEWAYS; do
+                echo "Deleting NAT Gateway: $NAT"
+                aws ec2 delete-nat-gateway --nat-gateway-id $NAT
+                
+                echo "Waiting for NAT Gateway deletion..."
+                aws ec2 wait nat-gateway-deleted --nat-gateway-id $NAT
+              done
+              
+              # Delete Load Balancers
+              LBS=$(aws elbv2 describe-load-balancers --query 'LoadBalancers[?VpcId==`'$VPC_ID'`].LoadBalancerArn' --output text)
+              for LB in $LBS; do
+                echo "Deleting Load Balancer: $LB"
+                aws elbv2 delete-load-balancer --load-balancer-arn $LB
+              done
+              
+              # Get and release Elastic IPs
+              EIPS=$(aws ec2 describe-addresses --query 'Addresses[?Domain==`vpc`].AllocationId' --output text)
+              for EIP in $EIPS; do
+                echo "Releasing Elastic IP: $EIP"
+                aws ec2 release-address --allocation-id $EIP || true
+              done
+              
+              # Delete EKS Cluster if it exists
+              if aws eks describe-cluster --name $CLUSTER_NAME --region ${{ env.AWS_REGION }} 2>/dev/null; then
+                echo "Deleting EKS cluster: $CLUSTER_NAME"
+                
+                # Delete all node groups first
+                NODEGROUPS=$(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --query 'nodegroups[*]' --output text)
+                for NG in $NODEGROUPS; do
+                  echo "Deleting node group: $NG"
+                  aws eks delete-nodegroup --cluster-name $CLUSTER_NAME --nodegroup-name $NG
+                  aws eks wait nodegroup-deleted --cluster-name $CLUSTER_NAME --nodegroup-name $NG
+                done
+                
+                # Delete the cluster
+                aws eks delete-cluster --name $CLUSTER_NAME
+                aws eks wait cluster-deleted --name $CLUSTER_NAME
               fi
-              echo "Still waiting for cluster deletion..."
-              sleep 30
-            done
-          }
-
-          # Check for existing node groups and delete them
-          if NODEGROUPS=$(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region ${{ env.AWS_REGION }} --query 'nodegroups[*]' --output text 2>/dev/null); then
-            echo "Found existing node groups: $NODEGROUPS"
-            for ng in $NODEGROUPS; do
-              echo "Deleting node group: $ng"
-              aws eks delete-nodegroup \
-                --cluster-name $CLUSTER_NAME \
-                --nodegroup-name $ng \
-                --region ${{ env.AWS_REGION }}
               
-              echo "Waiting for node group deletion..."
-              aws eks wait nodegroup-deleted \
-                --cluster-name $CLUSTER_NAME \
-                --nodegroup-name $ng \
-                --region ${{ env.AWS_REGION }}
+              # Delete subnets
+              SUBNETS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --query 'Subnets[*].SubnetId' --output text)
+              for SUBNET in $SUBNETS; do
+                echo "Deleting subnet: $SUBNET"
+                aws ec2 delete-subnet --subnet-id $SUBNET || true
+              done
+              
+              # Detach and delete internet gateway
+              IGW=$(aws ec2 describe-internet-gateways --filters "Name=attachment.vpc-id,Values=$VPC_ID" --query 'InternetGateways[*].InternetGatewayId' --output text)
+              if [ ! -z "$IGW" ]; then
+                echo "Detaching and deleting Internet Gateway: $IGW"
+                aws ec2 detach-internet-gateway --internet-gateway-id $IGW --vpc-id $VPC_ID
+                aws ec2 delete-internet-gateway --internet-gateway-id $IGW
+              fi
+              
+              # Delete route tables
+              RTS=$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$VPC_ID" --query 'RouteTables[?Associations[0].Main != `true`].RouteTableId' --output text)
+              for RT in $RTS; do
+                echo "Deleting route table: $RT"
+                aws ec2 delete-route-table --route-table-id $RT || true
+              done
+              
+              # Delete network interfaces
+              ENIS=$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$VPC_ID" --query 'NetworkInterfaces[*].NetworkInterfaceId' --output text)
+              for ENI in $ENIS; do
+                echo "Deleting network interface: $ENI"
+                aws ec2 delete-network-interface --network-interface-id $ENI || true
+              done
+              
+              # Delete security groups (except default)
+              SGS=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC_ID" --query 'SecurityGroups[?GroupName!=`default`].GroupId' --output text)
+              for SG in $SGS; do
+                echo "Deleting security group: $SG"
+                aws ec2 delete-security-group --group-id $SG || true
+              done
+              
+              # Finally delete the VPC
+              echo "Deleting VPC: $VPC_ID"
+              aws ec2 delete-vpc --vpc-id $VPC_ID || true
             done
-          fi
-
-          # Check for existing cluster and delete it
-          if aws eks describe-cluster --name $CLUSTER_NAME --region ${{ env.AWS_REGION }} 2>/dev/null; then
-            echo "Deleting existing EKS cluster: $CLUSTER_NAME"
-            aws eks delete-cluster \
-              --name $CLUSTER_NAME \
-              --region ${{ env.AWS_REGION }}
-            
-            wait_for_cluster_deletion $CLUSTER_NAME
-          fi
-        continue-on-error: true
-
-      - name: Check and Clean Existing IAM Roles
-        run: |
-          # Function to detach and delete role policies
-          delete_role() {
-            local ROLE_NAME=$1
-            echo "Checking role: $ROLE_NAME"
-            
-            # List and detach attached policies
-            for ARN in $(aws iam list-attached-role-policies --role-name $ROLE_NAME --query 'AttachedPolicies[*].PolicyArn' --output text 2>/dev/null); do
-              echo "Detaching policy: $ARN from role: $ROLE_NAME"
-              aws iam detach-role-policy --role-name $ROLE_NAME --policy-arn $ARN
-            done
-            
-            # Delete inline policies if any
-            for POLICY in $(aws iam list-role-policies --role-name $ROLE_NAME --query 'PolicyNames[*]' --output text 2>/dev/null); do
-              echo "Deleting inline policy: $POLICY from role: $ROLE_NAME"
-              aws iam delete-role-policy --role-name $ROLE_NAME --policy-name $POLICY
-            done
-            
-            # Delete the role
-            echo "Deleting role: $ROLE_NAME"
-            aws iam delete-role --role-name $ROLE_NAME
-          }
-
-          # Delete cluster role
-          CLUSTER_ROLE="${CLUSTER_NAME}-cluster-role"
-          if aws iam get-role --role-name $CLUSTER_ROLE 2>/dev/null; then
-            delete_role $CLUSTER_ROLE
-          fi
-
-          # Delete node role
-          NODE_ROLE="${CLUSTER_NAME}-node-role"
-          if aws iam get-role --role-name $NODE_ROLE 2>/dev/null; then
-            delete_role $NODE_ROLE
-          fi
-        continue-on-error: true
+          continue-on-error: true
 
       - name: Terraform Init
         working-directory: ${{ env.TERRAFORM_WORKING_DIR }}
